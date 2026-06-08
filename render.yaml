@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: luckybet2
+    runtime: python-3.12
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
