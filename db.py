@@ -1,4 +1,3 @@
-# ===== db.py =====
 import time
 import aiosqlite
 import os
@@ -105,9 +104,7 @@ async def get_lifetime_stats(user_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_stats_row(db, user_id)
         async with db.execute(
-            """SELECT games_played, games_won, games_lost, total_wagered, 
-                      promo_received, tips_sent, tips_received, total_withdrawn 
-               FROM stats WHERE user_id = ?""",
+            """SELECT games_played, games_won, games_lost, total_wagered, promo_received, tips_sent, tips_received, total_withdrawn FROM stats WHERE user_id = ?""",
             (user_id,)
         ) as cur:
             row = await cur.fetchone()
@@ -132,47 +129,6 @@ async def get_lifetime_stats(user_id: int) -> dict:
                 "tips_received": 0,
                 "total_withdrawn": 0,
             }
-
-async def record_game(user_id: int, won: bool, wagered: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await _ensure_stats_row(db, user_id)
-        await db.execute(
-            """UPDATE stats
-               SET games_played = games_played + 1,
-                   games_won = games_won + ?,
-                   games_lost = games_lost + ?,
-                   total_wagered = total_wagered + ?
-               WHERE user_id = ?""",
-            (1 if won else 0, 0 if won else 1, wagered, user_id)
-        )
-        await db.commit()
-
-async def add_promo_received(user_id: int, amount: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await _ensure_stats_row(db, user_id)
-        await db.execute(
-            "UPDATE stats SET promo_received = promo_received + ? WHERE user_id = ?",
-            (amount, user_id)
-        )
-        await db.commit()
-
-async def add_tip_sent(user_id: int, amount: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await _ensure_stats_row(db, user_id)
-        await db.execute(
-            "UPDATE stats SET tips_sent = tips_sent + ? WHERE user_id = ?",
-            (amount, user_id)
-        )
-        await db.commit()
-
-async def add_tip_received(user_id: int, amount: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await _ensure_stats_row(db, user_id)
-        await db.execute(
-            "UPDATE stats SET tips_received = tips_received + ? WHERE user_id = ?",
-            (amount, user_id)
-        )
-        await db.commit()
 
 async def add_withdrawal(user_id: int, amount: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:

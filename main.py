@@ -8,9 +8,9 @@ from discord.ext import commands
 
 from keep_alive import keep_alive
 from db import (
-init_db, get_balance, set_balance, get_leaderboard,
-record_wager, get_wager_req, add_wager_req,
-get_last_daily, set_last_daily,
+    init_db, get_balance, set_balance, get_leaderboard,
+    record_wager, get_wager_req, add_wager_req,
+    get_last_daily, set_last_daily, get_lifetime_stats, add_withdrawal
 )
 from games import coinflip, slots, blackjack_deal, hand_value, cards_display
 
@@ -20,449 +20,507 @@ DAILY_COOLDOWN = 86400
 SLOT_SYMBOLS   = ["🍒", "🍋", "🍉", "⭐", "💎"]
 
 IMG = {
-"coin":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1fa99.png",
-"slots":     "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3b0.png",
-"blackjack": "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f0cf.png",
-"money":     "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4b0.png",
-"trophy":    "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3c6.png",
-"transfer":  "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4b8.png",
-"gift":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f381.png",
-"bank":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3e6.png",
-"gem":       "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f48e.png",
-"bomb":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4a3.png",
+    "coin":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1fa99.png",
+    "slots":     "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3b0.png",
+    "blackjack": "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f0cf.png",
+    "money":     "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4b0.png",
+    "trophy":    "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3c6.png",
+    "transfer":  "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4b8.png",
+    "gift":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f381.png",
+    "bank":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f3e6.png",
+    "gem":       "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f48e.png",
+    "bomb":      "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4a3.png",
 }
 
 intents = discord.Intents.default()
-intents.message_content = True   # enabled in Discord Developer Portal
+intents.message_content = True
 bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
 
-── helpers ───────────────────────────────────────────────────────────────────
 
 def format_money(pts: int) -> str:
-return f"${pts * POINT_VALUE:,.2f}"
+    return f"${pts * POINT_VALUE:,.2f}"
 
 def balance_display(pts: int) -> str:
-return f"{pts:,} credits ({format_money(pts)})"
+    return f"**{pts:,}** credits ({format_money(pts)})"
 
 def validate_bet(bet: int, balance: int) -> str | None:
-if bet <= 0:
-return "Bet must be greater than 0."
-if bet > balance:
-return f"You only have {balance_display(balance)}."
-return None
+    if bet <= 0:
+        return "Bet must be greater than 0."
+    if bet > balance:
+        return f"You only have {balance_display(balance)}."
+    return None
 
 def seconds_to_hms(s: int) -> str:
-h, rem = divmod(s, 3600)
-m, sec = divmod(rem, 60)
-parts = []
-if h:   parts.append(f"{h}h")
-if m:   parts.append(f"{m}m")
-if sec or not parts: parts.append(f"{sec}s")
-return " ".join(parts)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    parts = []
+    if h:   parts.append(f"{h}h")
+    if m:   parts.append(f"{m}m")
+    if sec or not parts: parts.append(f"{sec}s")
+    return " ".join(parts)
 
 def make_embed(title: str, desc: str, color: discord.Color,
-image_key: str,
-user: discord.User | discord.Member | None = None,
-footer: str = "") -> discord.Embed:
-embed = discord.Embed(title=title, description=desc, color=color)
-embed.set_thumbnail(url=IMG[image_key])
-if user:
-embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-if footer:
-embed.set_footer(text=footer)
-return embed
+               image_key: str,
+               user: discord.User | discord.Member | None = None,
+               footer: str = "") -> discord.Embed:
+    embed = discord.Embed(title=title, description=desc, color=color)
+    embed.set_thumbnail(url=IMG[image_key])
+    if user:
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    if footer:
+        embed.set_footer(text=footer)
+    return embed
 
-── mines multiplier ─────────────────────────────────────────────────────────
 
-def mines_multiplier(total: int, mines: int, revealed: int,
-house_edge: float = 0.97) -> float:
-"""Probability-based cash-out multiplier after revealed safe tiles."""
-if revealed == 0:
-return 1.0
-prob = 1.0
-for i in range(revealed):
-safe_left  = total - mines - i
-total_left = total - i
-if total_left <= 0 or safe_left <= 0:
-return 0.0
-prob *= safe_left / total_left
-return round(house_edge / prob, 2)
+@bot.event
+async def on_ready():
+    await init_db()
+    await bot.tree.sync()
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("Bot is ready!")
 
-── interactive blackjack view ────────────────────────────────────────────────
 
-class BlackjackView(discord.ui.View):
-"""Manages a live blackjack hand with Hit / Stand / Double Down buttons."""
+@bot.command(name="balance", aliases=["bal"])
+async def prefix_balance(ctx: commands.Context):
+    uid = ctx.author.id
+    bal, wager = await get_balance(uid), await get_wager_req(uid)
+    embed = make_embed("💰 Balance", balance_display(bal), discord.Color.gold(),
+                       "money", ctx.author, footer=f"1 credit = {format_money(1)}")
+    if wager > 0:
+        embed.add_field(name="⚠️ Wager Requirement",
+                        value=f"Must wager **{wager:,}** more credits before withdrawing.", inline=False)
+    await ctx.send(embed=embed)
 
-def __init__(self, uid: int, initial_bet: int,  
-             player: list[int], dealer: list[int], deck: list[int],  
-             user: discord.User | discord.Member):  
-    super().__init__(timeout=120)  
-    self.uid         = uid  
-    self.initial_bet = initial_bet  
-    self.total_bet   = initial_bet   # grows on double down  
-    self.player      = list(player)  
-    self.dealer      = list(dealer)  
-    self.deck        = list(deck)  
-    self.user        = user  
-    self.message: discord.Message | None = None  
 
-# ── embed builders ────────────────────────────────────────────────────────  
+@bot.command(name="stats")
+async def prefix_stats(ctx: commands.Context, user: discord.User | None = None):
+    """View casino profile and lifetime statistics."""
+    target_user = user or ctx.author
+    uid = target_user.id
+    
+    bal = await get_balance(uid)
+    stats = await get_lifetime_stats(uid)
+    remaining = DAILY_COOLDOWN - (int(time.time()) - await get_last_daily(uid))
+    
+    embed = discord.Embed(
+        title=f"🎰 {target_user.display_name} Casino Profile",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=target_user.display_avatar.url)
+    
+    daily_status = f"⏳ Ready in {seconds_to_hms(remaining)}" if remaining > 0 else "✅ Ready to claim"
+    embed.add_field(
+        name="💰 Main Balance",
+        value=f"{balance_display(bal)}\n🎁 Daily Reward: {daily_status}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="──────── LIFETIME STATISTICS ────────",
+        value="** **",
+        inline=False
+    )
+    embed.add_field(
+        name="🎲 Games Played",
+        value=str(stats["games_played"]),
+        inline=True
+    )
+    embed.add_field(
+        name="🏆 Games Won",
+        value=str(stats["games_won"]),
+        inline=True
+    )
+    embed.add_field(
+        name="💀 Games Lost",
+        value=str(stats["games_lost"]),
+        inline=True
+    )
+    embed.add_field(
+        name="💸 Total Wagered",
+        value=f"**{stats['total_wagered']:,}** ({format_money(stats['total_wagered'])})",
+        inline=True
+    )
+    embed.add_field(
+        name="🎁 Bonus Received",
+        value=f"**{stats['promo_received']:,}** ({format_money(stats['promo_received'])})",
+        inline=True
+    )
+    embed.add_field(
+        name="📤 Tips Sent",
+        value=f"**{stats['tips_sent']:,}** ({format_money(stats['tips_sent'])})",
+        inline=True
+    )
+    embed.add_field(
+        name="📥 Tips Received",
+        value=f"**{stats['tips_received']:,}** ({format_money(stats['tips_received'])})",
+        inline=True
+    )
+    embed.add_field(
+        name="🏦 Total Withdrawn",
+        value=f"**{stats['total_withdrawn']:,}** ({format_money(stats['total_withdrawn'])})",
+        inline=True
+    )
+    
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
 
-def _active_embed(self) -> discord.Embed:  
-    pv = hand_value(self.player)  
-    embed = make_embed(  
-        "🃏 Blackjack", "Your move — choose an action below.",  
-        discord.Color.blurple(), "blackjack", self.user,  
-        footer=f"Bet: {self.total_bet:,} credits • {format_money(self.total_bet)}"  
-    )  
-    embed.add_field(name="🃏 Your Hand",  
-                    value=f"{cards_display(self.player)} = **{pv}**", inline=True)  
-    embed.add_field(name="🤖 Dealer Shows",  
-                    value=f"`{self.dealer[1]}` | `?`", inline=True)  
-    return embed  
 
-def _result_embed(self, title: str, desc: str, color: discord.Color,  
-                  net: int, new_balance: int) -> discord.Embed:  
-    pv = hand_value(self.player)  
-    dv = hand_value(self.dealer)  
-    net_str = f"+{format_money(net)}" if net > 0 else (f"-{format_money(abs(net))}" if net < 0 else "±$0.00")  
-    embed = make_embed(  
-        "🃏 Blackjack", f"**{title}** — {desc}",  
-        color, "blackjack", self.user,  
-        footer=f"Bet: {self.total_bet:,} credits • {format_money(self.total_bet)}"  
-    )  
-    embed.add_field(name="🃏 Your Hand",  
-                    value=f"{cards_display(self.player)} (**{pv}**)", inline=True)  
-    embed.add_field(name="🤖 Dealer Hand",  
-                    value=f"{cards_display(self.dealer)} (**{dv}**)", inline=True)  
-    embed.add_field(name="Net",         value=net_str,                 inline=True)  
-    embed.add_field(name="New Balance", value=balance_display(new_balance), inline=False)  
-    return embed  
+@bot.command(name="coinflip", aliases=["cf", "flip"])
+async def prefix_coinflip(ctx: commands.Context, bet: int = 0, side: str = ""):
+    side = side.lower()
+    side = {"h": "heads", "t": "tails"}.get(side, side)
+    if side not in ("heads", "tails") or bet <= 0:
+        await ctx.send("Usage: `.cf <amount> <heads|tails>`  e.g. `.cf 100 h`")
+        return
+    
+    balance = await get_balance(ctx.author.id)
+    if err := validate_bet(bet, balance):
+        await ctx.send(err)
+        return
+    
+    msg = await ctx.send("🪙 Flipping the coin...")
+    
+    for frame in ["🔵 Heads?", "⚪ Tails?", "🔵 Heads?", "⚪ Tails?", "🔵 Heads?", "⚪ Tails?"]:
+        await msg.edit(content=f"🪙 {frame}")
+        await asyncio.sleep(0.35)
 
-# ── game logic ────────────────────────────────────────────────────────────  
+    won, message, new_balance = coinflip(side, bet, balance)
+    await set_balance(ctx.author.id, new_balance)
+    await record_wager(ctx.author.id, bet)
 
-def _disable_all(self):  
-    for item in self.children:  
-        item.disabled = True  
+    embed = make_embed("�� Coin Flip", message,
+                       discord.Color.green() if won else discord.Color.red(),
+                       "coin", ctx.author,
+                       footer=f"Bet: {bet:,} credits • {format_money(bet)}")
+    embed.add_field(name="Result",      value="🏆 You won!" if won else "💀 You lost.", inline=True)
+    embed.add_field(name="Net",         value=f"+{format_money(bet)}" if won else f"-{format_money(bet)}", inline=True)
+    embed.add_field(name="New Balance", value=balance_display(new_balance), inline=False)
+    await msg.edit(content=None, embed=embed)
 
-def _disable_double(self):  
-    for item in self.children:  
-        if isinstance(item, discord.ui.Button) and item.label == "Double Down":  
-            item.disabled = True  
 
-async def _resolve(self, interaction: discord.Interaction):  
-    """Dealer draws to 17+ then settle the hand."""  
-    self._disable_all()  
+@bot.command(name="slots", aliases=["slot", "spin"])
+async def prefix_slots(ctx: commands.Context, bet: int = 0):
+    balance = await get_balance(ctx.author.id)
+    if err := validate_bet(bet, balance):
+        await ctx.send(err)
+        return
+    
+    msg = await ctx.send("🎰 Spinning the reels...")
+    
+    won, roll, payout, new_balance = slots(bet, balance)
+    await set_balance(ctx.author.id, new_balance)
+    await record_wager(ctx.author.id, bet)
 
-    while hand_value(self.dealer) < 17 and self.deck:  
-        self.dealer.append(self.deck.pop())  
+    spin = lambda: random.choice(SLOT_SYMBOLS)
+    for _ in range(4):
+        await msg.edit(content=f"🎰  {spin()} | {spin()} | {spin()}")
+        await asyncio.sleep(0.35)
+    for _ in range(2):
+        await msg.edit(content=f"🎰  **{roll[0]}** | {spin()} | {spin()}")
+        await asyncio.sleep(0.35)
+    for _ in range(2):
+        await msg.edit(content=f"🎰  **{roll[0]}** | **{roll[1]}** | {spin()}")
+        await asyncio.sleep(0.35)
+    await msg.edit(content=f"🎰  **{roll[0]}** | **{roll[1]}** | **{roll[2]}**")
+    await asyncio.sleep(0.5)
 
-    pv = hand_value(self.player)  
-    dv = hand_value(self.dealer)  
+    net = payout - bet
+    if payout == 0:
+        result_text, color = f"No match — lost **{bet:,}** credits.", discord.Color.red()
+    elif len(set(roll)) == 1:
+        result_text, color = f"🎉 JACKPOT! ×{payout // bet} multiplier!", discord.Color.gold()
+    else:
+        result_text, color = "Two of a kind! ×2 multiplier.", discord.Color.green()
 
-    if dv > 21:  
-        title, desc, payout_mult, color = "🎉 Dealer Busts — You Win!", "Dealer went over 21.", 2, discord.Color.green()  
-    elif pv > dv:  
-        title, desc, payout_mult, color = "🎉 You Win!", f"**{pv}** beats **{dv}**.", 2, discord.Color.green()  
-    elif pv == dv:  
-        title, desc, payout_mult, color = "🤝 Push", "It's a tie — bet returned.", 1, discord.Color.yellow()  
-    else:  
-        title, desc, payout_mult, color = "💀 Dealer Wins", f"**{dv}** beats **{pv}**.", 0, discord.Color.red()  
+    embed = make_embed("🎰 Slot Machine", f"# {roll[0]}  {roll[1]}  {roll[2]}",
+                       color, "slots", ctx.author,
+                       footer=f"Bet: {bet:,} credits • {format_money(bet)}")
+    embed.add_field(name="Result",      value=result_text,                   inline=False)
+    embed.add_field(name="Payout",      value=f"**{payout:,}** credits",     inline=True)
+    embed.add_field(name="Net",         value=(f"+{format_money(net)}" if net >= 0 else f"-{format_money(abs(net))}"), inline=True)
+    embed.add_field(name="New Balance", value=balance_display(new_balance),  inline=False)
+    await msg.edit(content=None, embed=embed)
 
-    payout = self.total_bet * payout_mult  
-    net    = payout - self.total_bet  
 
-    current = await get_balance(self.uid)  
-    new_bal = current + payout  
-    await set_balance(self.uid, new_bal)  
+@bot.command(name="blackjack", aliases=["bj"])
+async def prefix_blackjack(ctx: commands.Context, bet: int = 0):
+    balance = await get_balance(ctx.author.id)
+    if err := validate_bet(bet, balance):
+        await ctx.send(err)
+        return
+    
+    await set_balance(ctx.author.id, balance - bet)
+    await record_wager(ctx.author.id, bet)
 
-    embed = self._result_embed(title, desc, color, net, new_bal)  
-    await interaction.response.edit_message(content=None, embed=embed, view=self)  
+    player, dealer, deck = blackjack_deal()
+    player_val = hand_value(player)
+    dealer_val = hand_value(dealer)
 
-async def _bust(self, interaction: discord.Interaction):  
-    self._disable_all()  
-    pv      = hand_value(self.player)  
-    current = await get_balance(self.uid)  
-    embed   = make_embed(  
-        "🃏 Blackjack", "**💀 Bust! You went over 21.**",  
-        discord.Color.red(), "blackjack", self.user,  
-        footer=f"Bet: {self.total_bet:,} credits"  
-    )  
-    embed.add_field(name="🃏 Your Hand",  
-                    value=f"{cards_display(self.player)} (**{pv}**)", inline=True)  
-    embed.add_field(name="🤖 Dealer",  
-                    value=f"`{self.dealer[1]}` | `?`", inline=True)  
-    embed.add_field(name="Net",     value=f"-{format_money(self.total_bet)}", inline=True)  
-    embed.add_field(name="Balance", value=balance_display(current),           inline=False)  
-    await interaction.response.edit_message(content=None, embed=embed, view=self)  
+    msg = await ctx.send("🃏 Dealing cards...")
+    await asyncio.sleep(0.4)
+    await msg.edit(content=f"🃏  Your hand: `{player[0]}`\n🤖  Dealer shows: `?`")
+    await asyncio.sleep(0.5)
+    await msg.edit(content=f"🃏  Your hand: `{player[0]}` `{player[1]}`\n🤖  Dealer shows: `?`")
+    await asyncio.sleep(0.5)
+    await msg.edit(content=f"🃏  Your hand: `{player[0]}` `{player[1]}` = **{player_val}**\n🤖  Dealer shows: `{dealer[1]}`")
+    await asyncio.sleep(0.6)
 
-# ── buttons ───────────────────────────────────────────────────────────────  
+    if player_val == 21:
+        payout = int(bet * 1.5)
+        new_bal = balance - bet + bet + payout
+        await set_balance(ctx.author.id, new_bal)
+        embed = make_embed("🃏 Blackjack", "🎉 **BLACKJACK! Natural 21!**",
+                           discord.Color.gold(), "blackjack", ctx.author,
+                           footer=f"Bet: {bet:,} credits • 1.5× payout")
+        embed.add_field(name="🃏 Your Hand",   value=f"{cards_display(player)} (**21**)",       inline=True)
+        embed.add_field(name="🤖 Dealer Hand", value=f"{cards_display(dealer)} ({dealer_val})", inline=True)
+        embed.add_field(name="Payout",         value=f"+**{payout:,}** credits ({format_money(payout)})", inline=False)
+        embed.add_field(name="New Balance",    value=balance_display(new_bal),                  inline=False)
+        await msg.edit(content=None, embed=embed)
+        return
 
-@discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🃏")  
-async def hit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  
-    if interaction.user.id != self.uid:  
-        await interaction.response.send_message("This isn't your game!", ephemeral=True)  
-        return  
+    await msg.edit(content="🃏 Blackjack - Natural 21! You win!")
 
-    self.player.append(self.deck.pop())  
-    pv = hand_value(self.player)  
 
-    if pv > 21:  
-        await self._bust(interaction)  
-    elif pv == 21:  
-        await self._resolve(interaction)  
-    else:  
-        self._disable_double()  
-        await interaction.response.edit_message(embed=self._active_embed(), view=self)  
+@bot.command(name="daily")
+async def prefix_daily(ctx: commands.Context):
+    uid       = ctx.author.id
+    remaining = DAILY_COOLDOWN - (int(time.time()) - await get_last_daily(uid))
+    if remaining > 0:
+        embed = make_embed("⏳ Already Claimed", f"Come back in **{seconds_to_hms(remaining)}**.",
+                           discord.Color.orange(), "gift", ctx.author)
+        await ctx.send(embed=embed)
+        return
+    
+    bal     = await get_balance(uid)
+    new_bal = bal + DAILY_BONUS
+    await set_balance(uid, new_bal)
+    await set_last_daily(uid)
+    embed = make_embed("🎁 Daily Bonus",
+                       f"You claimed **{DAILY_BONUS}** credits ({format_money(DAILY_BONUS)})!",
+                       discord.Color.blurple(), "gift", ctx.author,
+                       footer="Next claim available in 24 hours.")
+    embed.add_field(name="New Balance", value=balance_display(new_bal), inline=False)
+    await ctx.send(embed=embed)
 
-@discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, emoji="✋")  
-async def stand_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  
-    if interaction.user.id != self.uid:  
-        await interaction.response.send_message("This isn't your game!", ephemeral=True)  
-        return  
-    await self._resolve(interaction)  
 
-@discord.ui.button(label="Double Down", style=discord.ButtonStyle.success, emoji="💰")  
-async def double_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  
-    if interaction.user.id != self.uid:  
-        await interaction.response.send_message("This isn't your game!", ephemeral=True)  
-        return  
+@bot.command(name="transfer", aliases=["send", "give"])
+async def prefix_transfer(ctx: commands.Context, user: discord.User = None, amount: int = 0):
+    if not user:
+        await ctx.send("Usage: `.transfer @user 100`")
+        return
+    if user.id == ctx.author.id:
+        await ctx.send("You can't transfer to yourself.")
+        return
+    if user.bot:
+        await ctx.send("You can't transfer to a bot.")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be greater than 0.")
+        return
+    
+    sb = await get_balance(ctx.author.id)
+    if amount > sb:
+        await ctx.send(f"You only have {balance_display(sb)}.")
+        return
+    
+    rb = await get_balance(user.id)
+    await set_balance(ctx.author.id, sb - amount)
+    await set_balance(user.id, rb + amount)
+    embed = make_embed("💸 Transfer Successful",
+                       f"Sent **{amount:,}** credits ({format_money(amount)}) to {user.mention}.",
+                       discord.Color.green(), "transfer", ctx.author)
+    embed.add_field(name="Your Balance",          value=balance_display(sb - amount), inline=True)
+    embed.add_field(name=f"{user.name}'s Balance", value=balance_display(rb + amount), inline=True)
+    await ctx.send(embed=embed)
 
-    current = await get_balance(self.uid)  
-    if current < self.initial_bet:  
-        await interaction.response.send_message(  
-            f"You need **{self.initial_bet:,}** credits to double down but only have {balance_display(current)}.",  
-            ephemeral=True  
-        )  
-        return  
 
-    # deduct the extra bet immediately  
-    await set_balance(self.uid, current - self.initial_bet)  
-    await record_wager(self.uid, self.initial_bet)  
-    self.total_bet += self.initial_bet  
+@bot.command(name="leaderboard", aliases=["lb", "top"])
+async def prefix_leaderboard(ctx: commands.Context):
+    rows = await get_leaderboard(10)
+    if not rows:
+        await ctx.send("No players yet!")
+        return
+    
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = [f"{medals[i] if i < 3 else f'`{i+1}.`'}  <@{uid}> — {balance_display(bal)}"
+              for i, (uid, bal) in enumerate(rows)]
+    embed = make_embed("🏆 Leaderboard", "\n".join(lines), discord.Color.gold(), "trophy",
+                       footer=f"1 credit = {format_money(1)}")
+    await ctx.send(embed=embed)
 
-    self.player.append(self.deck.pop())  
-    pv = hand_value(self.player)  
 
-    if pv > 21:  
-        await self._bust(interaction)  
-    else:  
-        await self._resolve(interaction)  
+@bot.command(name="withdraw", aliases=["wd"])
+async def prefix_withdraw(ctx: commands.Context):
+    uid   = ctx.author.id
+    bal   = await get_balance(uid)
+    wager = await get_wager_req(uid)
+    if wager > 0:
+        pct = max(0, 100 - int(wager / max(bal + wager, 1) * 100))
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        embed = make_embed("🏦 Withdraw Status",
+                           f"Wager **{wager:,}** more credits to unlock withdrawal.",
+                           discord.Color.orange(), "bank", ctx.author)
+        embed.add_field(name="Progress", value=f"`[{bar}]` {pct}%", inline=False)
+        embed.add_field(name="Balance",  value=balance_display(bal), inline=False)
+    else:
+        embed = make_embed("🏦 Withdraw Status",
+                           f"✅ Clear to withdraw **{bal:,}** credits ({format_money(bal)})!",
+                           discord.Color.green(), "bank", ctx.author,
+                           footer="Contact an admin to process your withdrawal.")
+    await ctx.send(embed=embed)
 
-async def on_timeout(self):  
-    self._disable_all()  
-    if self.message:  
-        try:  
-            await self.message.edit(  
-                content="⏰ Game timed out — buttons expired.",  
-                view=self  
-            )  
-        except Exception:  
-            pass
 
-── interactive mines view ────────────────────────────────────────────────────
+@bot.command(name="adminwithdraw", aliases=["aw", "withdrawupdate"])
+@commands.has_permissions(administrator=True)
+async def prefix_adminwithdraw(ctx: commands.Context, user: discord.User | None = None, amount: int = 0):
+    """[Admin] Manually record a withdrawal for a user."""
+    if not user:
+        await ctx.send("Usage: `.adminwithdraw @user <amount>`")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be greater than 0.")
+        return
+    
+    await add_withdrawal(user.id, amount)
+    stats = await get_lifetime_stats(user.id)
+    
+    embed = make_embed(
+        "🏦 Withdrawal Recorded",
+        f"Recorded **{amount:,}** credits ({format_money(amount)}) withdrawal for {user.mention}.",
+        discord.Color.green(), "bank",
+        footer=f"Updated by {ctx.author.display_name}"
+    )
+    embed.add_field(
+        name="Amount",
+        value=f"**{amount:,}** ({format_money(amount)})",
+        inline=True
+    )
+    embed.add_field(
+        name="Total Withdrawn",
+        value=f"**{stats['total_withdrawn']:,}** ({format_money(stats['total_withdrawn'])})",
+        inline=True
+    )
+    await ctx.send(embed=embed)
 
-class MinesView(discord.ui.View):
-"""4×5 grid of tiles (20 total) + Cash Out row. Mines hidden underneath."""
 
-GRID_ROWS = 4  
-GRID_COLS = 5  
-TOTAL     = GRID_ROWS * GRID_COLS  # 20 tiles  
+@prefix_adminwithdraw.error
+async def adminwithdraw_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Administrator permission required.")
 
-def __init__(self, uid: int, bet: int, mine_count: int,  
-             user: discord.User | discord.Member):  
-    super().__init__(timeout=300)  
-    self.uid        = uid  
-    self.bet        = bet  
-    self.mine_count = mine_count  
-    self.user       = user  
-    self.revealed   = [False] * self.TOTAL  
-    self.mines_pos  = set(random.sample(range(self.TOTAL), mine_count))  
-    self.safe_found = 0  
-    self.game_over  = False  
-    self.message: discord.Message | None = None  
 
-    for i in range(self.TOTAL):  
-        btn = discord.ui.Button(  
-            emoji="💠",  
-            style=discord.ButtonStyle.secondary,  
-            custom_id=f"mine_tile_{i}",  
-            row=i // self.GRID_COLS,  
-        )  
-        btn.callback = self._make_tile_cb(i)  
-        self.add_item(btn)  
+@bot.command(name="addbal", aliases=["ab"])
+@commands.has_permissions(administrator=True)
+async def prefix_addbal(ctx: commands.Context, user: discord.User = None, amount: int = 0):
+    if not user:
+        await ctx.send("Usage: `.addbal @user <amount>`")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be greater than 0.")
+        return
+    
+    bal     = await get_balance(user.id)
+    new_bal = bal + amount
+    await set_balance(user.id, new_bal)
+    embed = make_embed(
+        "✅ Balance Added",
+        f"Added **{amount:,}** credits ({format_money(amount)}) to {user.mention}.",
+        discord.Color.green(), "money",
+        footer=f"Done by {ctx.author.display_name}",
+    )
+    embed.add_field(name="Before", value=balance_display(bal),     inline=True)
+    embed.add_field(name="After",  value=balance_display(new_bal), inline=True)
+    await ctx.send(embed=embed)
 
-    cashout = discord.ui.Button(  
-        label="Cash Out",  
-        emoji="💰",  
-        style=discord.ButtonStyle.success,  
-        custom_id="mine_cashout",  
-        row=4,  
-    )  
-    cashout.callback = self._cashout_cb  
-    self.add_item(cashout)  
 
-# ── multiplier ────────────────────────────────────────────────────────────  
+@prefix_addbal.error
+async def addbal_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Administrator permission required.")
 
-def mult(self, after: int | None = None) -> float:  
-    return mines_multiplier(self.TOTAL, self.mine_count,  
-                            self.safe_found if after is None else after)  
 
-# ── embed builders ────────────────────────────────────────────────────────  
+@bot.command(name="removebal", aliases=["rmbal", "rb"])
+@commands.has_permissions(administrator=True)
+async def prefix_removebal(ctx: commands.Context, user: discord.User = None, amount: int = 0):
+    if not user:
+        await ctx.send("Usage: `.removebal @user <amount>`")
+        return
+    if amount <= 0:
+        await ctx.send("Amount must be greater than 0.")
+        return
+    
+    bal     = await get_balance(user.id)
+    new_bal = max(0, bal - amount)
+    removed = bal - new_bal
+    await set_balance(user.id, new_bal)
+    embed = make_embed(
+        "❌ Balance Removed",
+        f"Removed **{removed:,}** credits ({format_money(removed)}) from {user.mention}.",
+        discord.Color.red(), "money",
+        footer=f"Done by {ctx.author.display_name}",
+    )
+    embed.add_field(name="Before", value=balance_display(bal),     inline=True)
+    embed.add_field(name="After",  value=balance_display(new_bal), inline=True)
+    await ctx.send(embed=embed)
 
-def initial_embed(self) -> discord.Embed:  
-    embed = make_embed(  
-        "💎 Mines",  
-        f"**{self.mine_count}** mines hidden across **{self.TOTAL}** tiles.\n"  
-        f"Click tiles to reveal gems. Cash out before hitting a mine!",  
-        discord.Color.blurple(), "gem", self.user,  
-        footer=f"Bet: {self.bet:,} credits • {format_money(self.bet)}",  
-    )  
-    embed.add_field(name="💣 Mines",       value=str(self.mine_count),              inline=True)  
-    embed.add_field(name="💎 Safe Tiles",  value=str(self.TOTAL - self.mine_count), inline=True)  
-    embed.add_field(name="First Pick ×",   value=f"**{self.mult(1)}×**",            inline=True)  
-    return embed  
 
-def active_embed(self) -> discord.Embed:  
-    m      = self.mult()  
-    payout = int(self.bet * m)  
-    left   = self.TOTAL - self.mine_count - self.safe_found  
-    embed  = make_embed(  
-        "💎 Mines",  
-        f"**{self.safe_found}** gem{'s' if self.safe_found != 1 else ''} found — keep going or cash out!",  
-        discord.Color.blurple(), "gem", self.user,  
-        footer=f"Bet: {self.bet:,} credits • {self.mine_count} mines • {format_money(self.bet)}",  
-    )  
-    embed.add_field(name="💎 Found",         value=str(self.safe_found),        inline=True)  
-    embed.add_field(name="Multiplier",        value=f"**{m}×**",                 inline=True)  
-    embed.add_field(name="💰 Cashout Value",  value=f"**{payout:,}** credits",   inline=True)  
-    embed.add_field(name="🔷 Safe Tiles Left",value=str(left),                   inline=True)  
-    return embed  
+@prefix_removebal.error
+async def removebal_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Administrator permission required.")
 
-# ── button helpers ────────────────────────────────────────────────────────  
 
-def _tile_btn(self, idx: int) -> discord.ui.Button | None:  
-    for item in self.children:  
-        if isinstance(item, discord.ui.Button) and item.custom_id == f"mine_tile_{idx}":  
-            return item  
-    return None  
+@bot.command(name="help", aliases=["h", "commands", "cmds"])
+async def prefix_help(ctx: commands.Context):
+    embed = discord.Embed(
+        title="🎰 LuckyBet — Command List",
+        description=(
+            "Use `.` prefix for all commands below.\n"
+            f"**1 credit = {format_money(1)}**"
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.set_thumbnail(url=IMG["trophy"])
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
 
-def _disable_all(self):  
-    for item in self.children:  
-        item.disabled = True  
+    embed.add_field(
+        name="🎮 Games",
+        value=(
+            "`.cf <amt> <h|t>` — Coin flip\n"
+            "`.slots <amt>` — Slot machine\n"
+            "`.bj <amt>` — Blackjack\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💰 Economy",
+        value=(
+            "`.bal` — Check your balance\n"
+            "`.stats` — View your casino profile\n"
+            "`.daily` — Claim 2 free credits (24h cooldown)\n"
+            "`.transfer @user <amt>` — Send credits\n"
+            "`.withdraw` — Check withdrawal eligibility\n"
+            "`.lb` — Top 10 richest players\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🛠️ Admin Only",
+        value=(
+            "`.addbal @user <amt>` — Add credits (`.ab`)\n"
+            "`.removebal @user <amt>` — Remove credits (`.rmbal` `.rb`)\n"
+            "`.adminwithdraw @user <amt>` — Record withdrawal (`.aw`)"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="LuckyBet Casino • 1 credit = $0.01")
+    await ctx.send(embed=embed)
 
-def _show_mines(self, triggered: int | None = None):  
-    for pos in self.mines_pos:  
-        btn = self._tile_btn(pos)  
-        if btn and not self.revealed[pos]:  
-            btn.emoji    = discord.PartialEmoji.from_str("💥" if pos == triggered else "💣")  
-            btn.style    = discord.ButtonStyle.danger  
-            btn.disabled = True  
 
-# ── tile callback factory ─────────────────────────────────────────────────  
+token = os.environ.get("DISCORD_TOKEN")
+if not token:
+    raise RuntimeError("DISCORD_TOKEN environment variable not set")
 
-def _make_tile_cb(self, idx: int):  
-    async def _cb(interaction: discord.Interaction):  
-        if interaction.user.id != self.uid:  
-            await interaction.response.send_message("This isn't your game!", ephemeral=True)  
-            return  
-        if self.game_over or self.revealed[idx]:  
-            await interaction.response.send_message("Already revealed!", ephemeral=True)  
-            return  
-
-        await interaction.response.defer()  
-        self.revealed[idx] = True  
-
-        if idx in self.mines_pos:  
-            await self._hit_mine(interaction, idx)  
-        else:  
-            self.safe_found += 1  
-            btn = self._tile_btn(idx)  
-            if btn:  
-                btn.emoji    = discord.PartialEmoji.from_str("💎")  
-                btn.style    = discord.ButtonStyle.success  
-                btn.disabled = True  
-
-            if self.safe_found == self.TOTAL - self.mine_count:  
-                await self._auto_win(interaction)  
-            else:  
-                await interaction.edit_original_response(embed=self.active_embed(), view=self)  
-    return _cb  
-
-# ── game event handlers ───────────────────────────────────────────────────  
-
-async def _hit_mine(self, interaction: discord.Interaction, triggered: int):  
-    self.game_over = True  
-    self._disable_all()  
-
-    # Step 1 — show explosion tile  
-    btn = self._tile_btn(triggered)  
-    if btn:  
-        btn.emoji = discord.PartialEmoji.from_str("💥")  
-        btn.style = discord.ButtonStyle.danger  
-
-    boom_embed = make_embed(  
-        "💣 Mines", "**BOOM!** 💥  You hit a mine!",  
-        discord.Color.red(), "bomb", self.user,  
-        footer=f"Bet: {self.bet:,} credits",  
-    )  
-    await interaction.edit_original_response(embed=boom_embed, view=self)  
-    await asyncio.sleep(0.4)  
-
-    # Step 2 — reveal other mines one by one  
-    others = [p for p in self.mines_pos if p != triggered]  
-    random.shuffle(others)  
-    for pos in others:  
-        m_btn = self._tile_btn(pos)  
-        if m_btn:  
-            m_btn.emoji    = discord.PartialEmoji.from_str("💣")  
-            m_btn.style    = discord.ButtonStyle.danger  
-            m_btn.disabled = True  
-        await interaction.edit_original_response(view=self)  
-        await asyncio.sleep(0.15)  
-
-    # Step 3 — final result embed  
-    await asyncio.sleep(0.25)  
-    current_bal = await get_balance(self.uid)  
-    result = make_embed(  
-        "💣 Mines",  
-        f"**BOOM!** You triggered a mine after finding **{self.safe_found}** gem(s).",  
-        discord.Color.red(), "bomb", self.user,  
-        footer=f"Bet: {self.bet:,} credits • {self.mine_count} mines",  
-    )  
-    result.add_field(name="💎 Gems Found", value=str(self.safe_found),         inline=True)  
-    result.add_field(name="Result",         value="Mine hit — lost your bet",   inline=True)  
-    result.add_field(name="Net",            value=f"-{format_money(self.bet)}", inline=True)  
-    result.add_field(name="Balance",        value=balance_display(current_bal), inline=False)  
-    await interaction.edit_original_response(embed=result, view=self)  
-
-async def _cashout_cb(self, interaction: discord.Interaction):  
-    if interaction.user.id != self.uid:  
-        await interaction.response.send_message("This isn't your game!", ephemeral=True); return  
-    if self.game_over:  
-        await interaction.response.send_message("Game is already over!", ephemeral=True); return  
-    if self.safe_found == 0:  
-        await interaction.response.send_message(  
-            "Reveal at least one tile before cashing out!", ephemeral=True); return  
-
-    await interaction.response.defer()  
-    self.game_over = True  
-    self._disable_all()  
-    self._show_mines()  
-
-    m       = self.mult()  
-    payout  = int(self.bet * m)  
-    net     = payout - self.bet  
-    current = await get_balance(self.uid)  
-    new_bal = current + payout  
-    await set_balance(self.uid, new_bal)  
-
-    result = make_embed(  
-        "💎 Mines", f"💰 **Cashed out at {m}×!**",  
-        discord.Color.green(), "gem", self.user,  
-        footer=f"Bet: {self.bet:,} credits • {self.mine_count} mines",  
-    )  
-    result.add_field(name="💎 Gems Found", value=str(self.safe_found),                                inline=True)  
-    result.add_field(name="Multiplier",     value=f"**{m}×**",                                        inline=True)  
-    result.add_field(name="Net",            value=f"+{format_money(net)}",                            inline=True)  
-    result.
+keep_alive()
+bot.run(token)
