@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+data.db
+node_modules/
+yarn.lock
