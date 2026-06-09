@@ -188,7 +188,7 @@ async def prefix_coinflip(ctx: commands.Context, bet: int = 0, side: str = ""):
     await set_balance(ctx.author.id, new_balance)
     await record_wager(ctx.author.id, bet)
 
-    embed = make_embed("�� Coin Flip", message,
+    embed = make_embed("🪙 Coin Flip", message,
                        discord.Color.green() if won else discord.Color.red(),
                        "coin", ctx.author,
                        footer=f"Bet: {bet:,} credits • {format_money(bet)}")
@@ -518,9 +518,10 @@ async def prefix_help(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 
-token = os.environ.get("DISCORD_TOKEN")
-if not token:
-    raise RuntimeError("DISCORD_TOKEN environment variable not set")
-
-keep_alive()
-bot.run(token)
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise RuntimeError("DISCORD_TOKEN environment variable not set")
+    
+    keep_alive()
+    bot.run(token)
