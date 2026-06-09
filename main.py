@@ -519,9 +519,5 @@ async def prefix_help(ctx: commands.Context):
 
 
 if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        raise RuntimeError("DISCORD_TOKEN environment variable not set")
-    
     keep_alive()
-    bot.run(token)
+    bot.run(os.getenv("TOKEN"))
